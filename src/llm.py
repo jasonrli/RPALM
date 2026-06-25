@@ -1,6 +1,6 @@
 from openai import OpenAI
 import replicate
-from .config import OPENAI_API_KEY, REPLICATE_API_TOKEN, MODEL
+from .config import OPENAI_API_KEY, REPLICATE_API_TOKEN, MODEL, REQUERY_INCLUDE_ERRORS
 from .utils import *
 import re
 
@@ -95,7 +95,46 @@ class LLM:
             prompt += '\n{lemmas}' \
                 .format(lemmas= '\n'.join([trim_theorem(p, tokens_one)[1] for p in premises]))
         return prompt
-    
+
+
+    def get_requery_prompt(self, goals, succeeded_tactics, recent_errors, premises, defs):
+        prompt = instruction
+
+        assert goals != [], 'goals is [] before re-querying'
+        goal = goals[0]
+
+        prompt += '\n\nThe following tactics have been successfully applied:\n'
+        if succeeded_tactics:
+            prompt += '```coq\n' + '\n'.join(succeeded_tactics) + '\n```\n'
+        else:
+            prompt += '(none)\n'
+
+        prompt += '\nThe proof then encountered errors:\n'
+        for err in recent_errors[-REQUERY_INCLUDE_ERRORS:]:
+            tactic = err.get('tactic', '')
+            exn = err.get('exn', '')[:200]
+            prompt += '- Tactic `%s` failed: %s\n' % (tactic, exn)
+
+        prompt += '\nThe current proof state is:\n\n'
+        prompt += 'Hypotheses:\n{hypos}\n\nGoal:\n{goal}\n\n'\
+                    .format(hypos='\n'.join([f'{k}: {v}' for k, v in goal['hypos'].items()]) if goal['hypos'] else 'None', goal=goal['goal'])
+        prompt += 'Continue the proof from this state. Do NOT repeat the tactics that already succeeded.\n'
+        prompt += 'Your response should be a singular code block of Coq proof starting with "```coq\\n", ending with "Qed.```".\n'
+
+        if defs != [] or premises != []:
+            prompt += '\nPremises:'
+        if defs != []:
+            num_tokens = self.max_tokens - sum(self.length) - trim_prompt(prompt)[0]
+            tokens_one = int(num_tokens/(len(defs)+len(premises))) if (len(defs)+len(premises)) > 0 else num_tokens
+            prompt += '\n{defs}' \
+                .format(defs= '\n'.join([trim_prompt(d, tokens_one)[1] for d in defs]))
+        if premises != []:
+            num_tokens = self.max_tokens - sum(self.length) - trim_prompt(prompt)[0]
+            tokens_one = int(num_tokens/len(premises)) if len(premises) > 0 else num_tokens
+            prompt += '\n{lemmas}' \
+                .format(lemmas= '\n'.join([trim_theorem(p, tokens_one)[1] for p in premises]))
+        return prompt
+
 
     def query(self, prompt: str):
         if MODEL.startswith('gpt'):

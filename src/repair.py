@@ -19,6 +19,11 @@ USED_VAR = r'(.*?) is ((already used)|(used twice))'
 
 RE_QUERY = 'Error with {tactic}: {msg}. Give a new proof starting from it.'
 
+REPAIR_UNHANDLED = 'unhandled'
+REPAIR_SUBSTANTIVE = 'substantive'
+REPAIR_SKIP = 'skip'
+REPAIR_STRUCTURAL = 'structural'
+
 
 # def log(t, ts):
 #     out_file = os.path.join(proof_path, exp_name, file_name, theorem_name+'.json')        
@@ -464,13 +469,27 @@ class Repair:
                 if extend is not None:
                     tactics.extendleft([(t, name) for t in extend])
                 state.history.add_exn(tactic, msg, name, True)
-                return True
-                    
+                return self._classify_repair(name, extend)
+
         for name, (pattern, handler)in unhandle_errors.items():
             match = re.search(pattern, msg)
             if match is not None:
                 state.history.add_exn(tactics[0], msg, name)
-        return False
+        return REPAIR_UNHANDLED
+
+    @staticmethod
+    def _classify_repair(name, extend):
+        if name in ('no_more_goals', 'no_more_subgoals', 'no_goal',
+                     'unfinished_bullet', 'failed_bullet', 'wrong_unfocus',
+                     'next_goal'):
+            return REPAIR_STRUCTURAL
+        if name in ('wrong_bullet', 'used_var', 'no_product'):
+            return REPAIR_SUBSTANTIVE
+        if extend is None or extend == []:
+            return REPAIR_SKIP
+        if all(t.startswith('qsimpl') for t in extend):
+            return REPAIR_SKIP
+        return REPAIR_SUBSTANTIVE
     
 
 # def replace_coq_tactic(input_string, pattern, replace):

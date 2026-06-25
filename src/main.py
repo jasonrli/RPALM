@@ -3,6 +3,7 @@ from .utils import *
 from .llm import LLM
 from .framework import State
 from .repair import Repair
+from . import config
 from .retrieval import Retrieval
 import json
 import traceback
@@ -142,8 +143,12 @@ if __name__ == '__main__':
     parser.add_argument('-skip', default=False, action='store_true')
     parser.add_argument('-backtrack', default=False, action='store_true')
     parser.add_argument('-intersect', default=False, action='store_true')
+    parser.add_argument('-requery', default=False, action='store_true')
 
     args = parser.parse_args()
+
+    if not args.requery:
+        config.REQUERY_MAX_ATTEMPTS = 0
 
     run(proj=args.proj, threads=args.threads, exp_name=args.exp_name, theorem=args.theorem, resume=args.resume, \
         backtrack=args.backtrack, skip=args.skip, intersect=args.intersect)

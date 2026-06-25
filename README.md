@@ -1,5 +1,79 @@
 # PALM: Proof Automation with Large Language Models
 
+## R-PALM: Requerying PALM
+
+### Problem
+
+PALM gives the LLM exactly one shot to generate a proof. Tactics are executed one-by-one and errors are repaired locally (rename a variable, swap a bullet, try `qsimpl`), but if the overall proof strategy is wrong -- wrong induction variable, wrong lemma, wrong decomposition -- no amount of local repair can save it. The remaining tactics cascade into failures, get skipped, and the unsolved subgoals are dumped on CoqHammer's backtracking, which brute-forces them without any strategic insight.
+
+From the evaluation logs: a typical failed proof accumulates 5-10 exceptions, ~85% of which are "handled" by the repair module but not actually fixed -- the handler just pops the bad tactic and inserts a speculative `qsimpl` that also fails. The proof is strategically dead after the first 2-3 failures, but PALM keeps going until everything is drained.
+
+### What we changed
+
+We added **multi-turn LLM re-querying**. When the proof goes off the rails, we stop, tell the LLM what worked, what failed, and what the current goal looks like, and ask it to continue from there.
+
+**How it detects "off the rails":** We classify every repair outcome into four categories:
+- **SUBSTANTIVE** -- genuine fix (correct bullet, rename variable, find replacement reference)
+- **STRUCTURAL** -- proof navigation (shelve, bullet skip)
+- **SKIP** -- handler matched but only popped the tactic or inserted a hail-mary `qsimpl`
+- **UNHANDLED** -- no handler matched at all
+
+We track consecutive SKIP/UNHANDLED outcomes. When 3 in a row occur, the proof strategy is broken. At that point:
+
+1. Flush remaining tactics (collecting lemma names as CoqHammer hints, same as before)
+2. Re-retrieve premises against the *current* goal state (not the original)
+3. Build a re-query prompt: succeeded tactics + error messages + current goals + fresh premises
+4. Query the LLM again and resume execution with the new tactics
+
+Budget is capped at 2 re-queries per theorem. If both fail, the existing skip + backtrack flow takes over as before.
+
+### Usage
+
+Add `-requery` to enable:
+```
+python -m src.main --proj="verdi" --exp_name="test" -skip -backtrack -requery
+```
+
+Without `-requery`, behavior is identical to the original PALM.
+
+### Configuration
+
+In `src/config.py`:
+```python
+REQUERY_FAILURE_THRESHOLD = 3    # consecutive non-substantive failures before re-querying
+REQUERY_MAX_ATTEMPTS = 2         # max re-queries per theorem
+REQUERY_INCLUDE_ERRORS = 3       # number of recent errors to include in the re-query prompt
+```
+
+### Files modified
+
+| File | Change |
+|------|--------|
+| `src/config.py` | Added re-query configuration constants |
+| `src/repair.py` | `repair()` now returns outcome category instead of bool; added `_classify_repair()` |
+| `src/llm.py` | Added `get_requery_prompt()` for building context-rich follow-up prompts |
+| `src/framework.py` | Added `requery_llm()` method; modified `prove()` loop with failure counter and re-query trigger |
+| `src/main.py` | Added `-requery` CLI flag |
+
+### Experiment logs
+
+When re-querying is enabled, the per-theorem JSON logs include two new fields:
+```json
+{
+    "requery_count": 1,
+    "requery_history": [
+        {
+            "attempt": 1,
+            "succeeded_before": ["intros.", "induction n.", "-"],
+            "errors_before": [...],
+            "new_tactics": "simpl. rewrite IHn. auto."
+        }
+    ]
+}
+```
+
+---
+
 The source code and experiment scripts of the paper submitted to ASE 2024.
 
 ## Overview

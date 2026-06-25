@@ -5,7 +5,8 @@ import re
 from collections import deque
 from .utils import *
 from .retrieval import Retrieval
-from .repair import Repair, WRONG_BULLET, UNFINISHED_BULLET, WRONG_BULLET_UNFOUCS, NO_MORE_GOALS, NO_MORE_SUBGOALS
+from .repair import Repair, WRONG_BULLET, UNFINISHED_BULLET, WRONG_BULLET_UNFOUCS, NO_MORE_GOALS, NO_MORE_SUBGOALS, \
+    REPAIR_UNHANDLED, REPAIR_SUBSTANTIVE, REPAIR_SKIP, REPAIR_STRUCTURAL
 from .config import *
 
 
@@ -62,6 +63,9 @@ class State:
         self.use_qualids = set()
         self.lemmas = []
         self.hammer_times = 0
+        self.requery_count = 0
+        self.consecutive_failures = 0
+        self.requery_history = []
 
     
     def reset(self):
@@ -159,6 +163,51 @@ class State:
         return self.llm.query(prompt.strip())
 
 
+    def requery_llm(self, tactics):
+        if self.requery_count >= REQUERY_MAX_ATTEMPTS:
+            return None
+        if not self.fg_goals:
+            return None
+
+        while tactics:
+            tactic, _ = tactics.popleft()
+            qualids = extract_qualids(tactic)
+            hypos = set(self.fg_goals[0]['hypos'].keys() if self.fg_goals else [])
+            for q in qualids:
+                if q not in hypos and self.serapi.locate(q) is not None:
+                    self.use_qualids.add(q)
+
+        succeeded_tactics = self.history.as_list()
+        recent_errors = self.history.exceptions[-REQUERY_INCLUDE_ERRORS:]
+
+        premises, defs, lemmas = self.get_premises()
+        self.lemmas = lemmas
+
+        prompt = self.llm.get_requery_prompt(
+            self.fg_goals,
+            succeeded_tactics,
+            recent_errors,
+            premises[:State.max_lemmas],
+            defs
+        )
+        new_tactics_str = self.llm.query(prompt.strip())
+
+        new_tactics, exn = tactic_unifier(self.serapi, new_tactics_str)
+
+        self.requery_count += 1
+        self.consecutive_failures = 0
+        self.requery_history.append({
+            'attempt': self.requery_count,
+            'succeeded_before': succeeded_tactics,
+            'errors_before': recent_errors,
+            'new_tactics': new_tactics_str,
+        })
+
+        print('[REQUERY %d] New tactics: %s' % (self.requery_count, new_tactics))
+
+        return deque([(t, 'requery_%d' % self.requery_count) for t in new_tactics])
+
+
     def diff(self, fg_goals, bg_goals, shelved_goals):
         if not(len(self.fg_goals) == len(fg_goals)
                and len(self.bg_goals) == len(bg_goals)
@@ -221,12 +270,26 @@ class State:
             if state_id < 0 and exn is not None:
                 exn_msg = str(exn)
                 print(t, exn_msg)
-                repair_succ = self.repair.repair(exn_msg, self, tactics)
-                if not repair_succ:
-                    self.skip_goal(tactics)
+                repair_result = self.repair.repair(exn_msg, self, tactics)
+
+                if repair_result in (REPAIR_UNHANDLED, REPAIR_SKIP):
+                    self.consecutive_failures += 1
+                    if (self.consecutive_failures >= REQUERY_FAILURE_THRESHOLD
+                            and self.requery_count < REQUERY_MAX_ATTEMPTS
+                            and self.fg_goals):
+                        new_tactics = self.requery_llm(tactics)
+                        if new_tactics is not None:
+                            tactics = new_tactics
+                            continue
+                    if repair_result == REPAIR_UNHANDLED:
+                        self.skip_goal(tactics)
+
+                elif repair_result in (REPAIR_SUBSTANTIVE, REPAIR_STRUCTURAL):
+                    self.consecutive_failures = 0
             # success
             else:
                 tactics.popleft()
+                self.consecutive_failures = 0
                         
         if len(self.fg_goals) == 1:
             self.execute_and_update('shelve.')
@@ -368,7 +431,9 @@ class State:
     def log(self):
         history_log = self.history.log()
         llm_log = self.llm.log()
-        return {'history': history_log, 'chat': llm_log, 'original': self.original, 'hammer_times': self.hammer_times}
+        return {'history': history_log, 'chat': llm_log, 'original': self.original,
+                'hammer_times': self.hammer_times, 'requery_count': self.requery_count,
+                'requery_history': self.requery_history}
     
 
 if __name__ == '__main__':

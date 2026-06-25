@@ -18,3 +18,7 @@ projects_path = '/home/username/data/coq_projects'
 data_path = './data'
 eval_path = './evaluation'
 proof_path = os.path.join(eval_path, 'proof')
+
+REQUERY_FAILURE_THRESHOLD = 3
+REQUERY_MAX_ATTEMPTS = 2
+REQUERY_INCLUDE_ERRORS = 3
